@@ -2,9 +2,11 @@ import streamlit as st
 from fpdf import FPDF
 import tempfile
 import os
+from PIL import Image
+import io
 
 # --- CONFIGURACIÓN GENERAL ---
-TASA_CAMBIO = 7.80
+TASA_CAMBIO = 7.95  # <--- CAMBIO SOLICITADO (ANTES 7.80)
 
 # --- 1. GASTOS FIJOS COPART ---
 GASTOS_FIJOS_COPART = {
@@ -15,7 +17,7 @@ GASTOS_FIJOS_COPART = {
 # --- 2. GASTOS ADMINISTRATIVOS EXTRA (USA) ---
 EXTRA_USD_BL = 20.00
 EXTRA_USD_PAPELERIA = 25.00
-EXTRA_USD_WIRE = 25.00
+EXTRA_USD_WIRE = 50.00 
 TOTAL_EXTRAS_USD = EXTRA_USD_BL + EXTRA_USD_PAPELERIA + EXTRA_USD_WIRE
 
 # --- 3. GASTOS FIJOS GUATEMALA (TRAMITE) ---
@@ -215,9 +217,10 @@ def get_buyer_fee_clean(precio):
     elif precio < 10000: return 1090.00
     else: return 1090.00 + ((precio - 10000) * 0.20)
 
-# --- FUNCIÓN GENERAR PDF DETALLADO ---
+# --- FUNCIÓN GENERAR PDF DETALLADO (V7 - DOBLE MONEDA + SUBTOTALES) ---
 def generar_pdf_detallado(datos_pdf, imagen_file):
     pdf = FPDF()
+    pdf.set_auto_page_break(auto=False) # CONTROL MANUAL DE SALTO DE PÁGINA
     pdf.add_page()
     
     # --- ENCABEZADO ---
@@ -227,7 +230,7 @@ def generar_pdf_detallado(datos_pdf, imagen_file):
     pdf.cell(0, 5, txt="Generado automáticamente por Importadora App", ln=True, align="C")
     pdf.ln(10)
     
-    # --- DATOS DEL VEHÍCULO ---
+    # --- 1. INFORMACIÓN DEL VEHÍCULO ---
     pdf.set_fill_color(230, 230, 230)
     pdf.set_font("Arial", "B", 12)
     pdf.cell(0, 8, txt="1. INFORMACIÓN DEL VEHÍCULO", ln=True, fill=True)
@@ -235,96 +238,206 @@ def generar_pdf_detallado(datos_pdf, imagen_file):
     
     pdf.set_font("Arial", "", 11)
     vehiculo = datos_pdf['vehiculo']
-    # Fila 1
     pdf.cell(95, 7, txt=f"Lote: {vehiculo['lote']}", border=1)
     pdf.cell(95, 7, txt=f"Vehículo: {vehiculo['descripcion']}", border=1, ln=True)
-    # Fila 2
     pdf.cell(95, 7, txt=f"Tipo Título: {vehiculo['titulo']}", border=1)
     pdf.cell(95, 7, txt=f"Ubicación: {vehiculo['ubicacion']}", border=1, ln=True)
     pdf.ln(5)
 
-    # --- FOTO GIGANTE ---
+    # --- FOTO GIGANTE DEL AUTO ---
     if imagen_file is not None:
         try:
             with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp_file:
                 tmp_file.write(imagen_file.getvalue())
                 tmp_path = tmp_file.name
             
-            # Centrar imagen (A4 ancho = 210mm)
-            ancho_imagen = 170  # Antes 100, ahora 170 para que se vea GRANDE
+            ancho_imagen = 170
             x_img = (210 - ancho_imagen) / 2
             
+            # Verificar espacio para foto (aprox 100mm altura)
+            if pdf.get_y() + 100 > 270:
+                pdf.add_page()
+
             pdf.image(tmp_path, x=x_img, w=ancho_imagen)
             os.remove(tmp_path)
             pdf.ln(5)
         except:
             pdf.cell(0, 10, txt="(Error al cargar imagen)", ln=True, align="C")
 
-    # --- DESGLOSE FINANCIERO ---
+    # --- 2. DESGLOSE DE COSTOS ---
+    if pdf.get_y() + 20 > 270: pdf.add_page()
     pdf.set_font("Arial", "B", 12)
     pdf.cell(0, 8, txt="2. DESGLOSE DE COSTOS", ln=True, fill=True)
     pdf.ln(2)
     
-    def fila(texto, valor, negrita=False):
-        pdf.set_font("Arial", "B" if negrita else "", 11)
-        pdf.cell(140, 7, txt=texto, border="B")
-        pdf.cell(50, 7, txt=valor, border="B", align="R", ln=True)
+    def fila(texto, valor, negrita=False, subitem=False):
+        # CHECK DE PAGINACIÓN MANUAL PARA EVITAR BUG DE TABLAS CORTADAS
+        if pdf.get_y() > 265: # Si estamos muy abajo (A4 es ~297mm)
+            pdf.add_page()
+            
+        pdf.set_font("Arial", "B" if negrita else "", 10)
+        indent = "    " if subitem else ""
+        pdf.cell(130, 6, txt=indent + texto, border="B") # Reducido un poco para dar espacio a valores largos
+        pdf.cell(60, 6, txt=valor, border="B", align="R", ln=True)
 
     fin = datos_pdf['financiero']
+    det_copart = datos_pdf['detalle_copart']
+    det_usa = datos_pdf['detalle_usa']
+    det_gt = datos_pdf['detalle_gt']
     
-    # Copart
+    # A. Copart
+    if pdf.get_y() + 10 > 270: pdf.add_page()
     pdf.set_font("Arial", "B", 11)
     pdf.cell(0, 8, txt="A. Costos Copart (USA)", ln=True)
-    fila("Precio Subasta", fin['precio_subasta'])
-    fila("Buyer Fee", fin['buyer'])
-    fila("Virtual Bid Fee", fin['virtual'])
-    fila("Gate / Env / Title", fin['gate_env'])
+    fila("Precio Subasta (Winning Bid)", fin['precio_subasta'], negrita=True)
+    fila("   - Buyer Fee", det_copart['buyer'], subitem=True)
+    fila("   - Virtual Bid Fee", det_copart['virtual'], subitem=True)
+    fila("   - Gate Fee", det_copart['gate'], subitem=True)
+    fila("   - Environmental Fee", det_copart['env'], subitem=True)
+    fila("   - Title Mailing", det_copart['title'], subitem=True)
     fila("TOTAL FACTURA COPART", fin['total_copart'], negrita=True)
     pdf.ln(2)
 
-    # Logística
+    # B. Logística
+    if pdf.get_y() + 10 > 270: pdf.add_page()
     pdf.set_font("Arial", "B", 11)
     pdf.cell(0, 8, txt="B. Logística y Trámites", ln=True)
-    fila("Grúa (Towing)", fin['grua'])
-    fila("Flete Marítimo (Barco)", fin['barco'])
-    fila("Trámites USA (BL, Docs)", fin['extras_usa'])
+    fila("Grúa (Towing) -> Puerto", fin['grua'])
+    fila("Flete Marítimo (Ocean Freight)", fin['barco'])
+    fila("   - BL (Documentación Naviera)", det_usa['bl'], subitem=True)
+    fila("   - Papelería / Courier", det_usa['papeleria'], subitem=True)
+    fila("   - Wire Transfer (Transferencia)", det_usa['wire'], subitem=True)
     fila("TOTAL LOGÍSTICA", fin['total_logistica'], negrita=True)
     pdf.ln(2)
 
-    # Impuestos
+    # C. Impuestos
+    if pdf.get_y() + 10 > 270: pdf.add_page()
     pdf.set_font("Arial", "B", 11)
-    pdf.cell(0, 8, txt="C. Impuestos Aduana (SAT)", ln=True)
-    fila("Impuestos (32% IPRIMA + IVA)", fin['impuestos_gtq'])
-    pdf.ln(2)
-
-    # Locales
-    pdf.set_font("Arial", "B", 11)
-    pdf.cell(0, 8, txt="D. Gastos Locales (GT)", ln=True)
-    fila("Honorarios, Placas, Circulación", fin['gastos_fijos_gt'])
+    pdf.cell(0, 8, txt="C. Impuestos y Locales (GT)", ln=True)
+    fila("Impuestos Aduana (IPRIMA + IVA)", fin['impuestos_gtq'])
     fila("Trámite Aduanal", fin['tramite_aduanal'])
+    fila("   - Honorarios de Importación", det_gt['honorarios'], subitem=True)
+    fila("   - Placas y Tarjeta", det_gt['placas'], subitem=True)
+    fila("   - Impuesto de Circulación", det_gt['circulacion'], subitem=True)
     if fin['flete_interno'] != "No incluido":
-        fila("Flete Interno", fin['flete_interno'])
+        fila("Flete Interno (Puerto -> Capital)", fin['flete_interno'])
     fila("TOTAL GASTOS LOCALES", fin['total_locales'], negrita=True)
     pdf.ln(2)
 
-    # Reparaciones
-    if fin['reparaciones'] != "Q0.00":
-        pdf.set_font("Arial", "B", 11)
-        fila("E. Estimado Reparaciones", fin['reparaciones'])
+    # --- 3. REPARACIONES Y REPUESTOS ---
+    lista_rep = datos_pdf.get('lista_repuestos', [])
+    lista_mo = datos_pdf.get('lista_mano_obra', [])
+    subtotal_rep = datos_pdf.get('subtotal_repuestos', "Q0.00")
+    subtotal_mo = datos_pdf.get('subtotal_mano_obra', "Q0.00")
+    
+    if lista_rep or lista_mo:
+        pdf.ln(5)
+        if pdf.get_y() + 20 > 270: pdf.add_page()
+        pdf.set_font("Arial", "B", 12)
+        pdf.cell(0, 8, txt="3. REPARACIONES Y SERVICIOS", ln=True, fill=True)
         pdf.ln(2)
+        
+        # TABLA DE REPUESTOS
+        if lista_rep:
+            if pdf.get_y() + 10 > 270: pdf.add_page()
+            pdf.set_font("Arial", "B", 10)
+            pdf.cell(0, 6, "A. REPUESTOS COTIZADOS", ln=True)
+            pdf.set_font("Arial", "B", 9)
+            pdf.cell(90, 6, "Repuesto", 1)
+            pdf.cell(30, 6, "Precio (Q)", 1)
+            pdf.cell(70, 6, "Ref/Link", 1, ln=True)
+            
+            pdf.set_font("Arial", "", 9)
+            for rep in lista_rep:
+                # Altura de la fila
+                altura_fila = 15 if rep.get('foto_bytes') else 8
+                
+                # PROTECCIÓN DE SALTO DE PÁGINA
+                if pdf.get_y() + altura_fila > 270:
+                    pdf.add_page()
+                    pdf.set_font("Arial", "B", 9)
+                    pdf.cell(90, 6, "Repuesto (cont.)", 1)
+                    pdf.cell(30, 6, "Precio (Q)", 1)
+                    pdf.cell(70, 6, "Ref/Link", 1, ln=True)
+                    pdf.set_font("Arial", "", 9)
 
-    # --- TOTAL FINAL ---
-    pdf.ln(5)
-    pdf.set_fill_color(0, 51, 102) # Azul oscuro
-    pdf.set_text_color(255, 255, 255) # Blanco
-    pdf.set_font("Arial", "B", 14)
-    pdf.cell(140, 12, txt=" COSTO TOTAL APROXIMADO (Q)", fill=True)
-    pdf.cell(50, 12, txt=fin['gran_total'] + " ", fill=True, align="R", ln=True)
+                y_inicio = pdf.get_y()
+                
+                # Nombre
+                nombre_corto = (rep['nombre'][:35] + '..') if len(rep['nombre']) > 35 else rep['nombre']
+                pdf.set_xy(10, y_inicio)
+                pdf.cell(90, altura_fila, nombre_corto, 1)
+                
+                # Miniatura
+                if rep.get('foto_bytes'):
+                    try:
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp_th:
+                            tmp_th.write(rep['foto_bytes'])
+                            tmp_th_path = tmp_th.name
+                        pdf.image(tmp_th_path, x=60, y=y_inicio+1, h=13)
+                        os.remove(tmp_th_path)
+                    except: pass
+                
+                # Precio
+                pdf.set_xy(100, y_inicio)
+                pdf.cell(30, altura_fila, f"Q{rep['precio']:,.2f}", 1)
+                
+                # Link
+                pdf.set_xy(130, y_inicio)
+                link_corto = (rep['link'][:35] + '..') if len(rep['link']) > 35 else rep['link']
+                pdf.cell(70, altura_fila, link_corto, 1, ln=True)
+            
+            # Subtotal Repuestos
+            pdf.set_font("Arial", "B", 9)
+            pdf.cell(140, 6, "Subtotal Repuestos:", 0, 0, 'R')
+            pdf.cell(50, 6, subtotal_rep, 0, 1, 'R')
+        
+        # TABLA DE MANO DE OBRA
+        if lista_mo:
+            pdf.ln(5)
+            if pdf.get_y() + 20 > 270: pdf.add_page()
+            pdf.set_font("Arial", "B", 10)
+            pdf.cell(0, 6, "B. MANO DE OBRA Y SERVICIOS", ln=True)
+            pdf.set_font("Arial", "B", 9)
+            pdf.cell(140, 6, "Servicio / Descripción", 1)
+            pdf.cell(50, 6, "Precio (Q)", 1, ln=True)
+            
+            pdf.set_font("Arial", "", 9)
+            for mo in lista_mo:
+                if pdf.get_y() + 8 > 270: pdf.add_page()
+                pdf.cell(140, 6, mo['descripcion'], 1)
+                pdf.cell(50, 6, f"Q{mo['precio']:,.2f}", 1, ln=True)
+            
+            # Subtotal Mano de Obra
+            pdf.set_font("Arial", "B", 9)
+            pdf.cell(140, 6, "Subtotal Mano de Obra:", 0, 0, 'R')
+            pdf.cell(50, 6, subtotal_mo, 0, 1, 'R')
+        
+        # TOTAL REPARACIONES
+        pdf.ln(2)
+        if pdf.get_y() + 10 > 270: pdf.add_page()
+        fila("TOTAL REPARACIONES Y SERVICIOS", fin['total_reparaciones'], negrita=True)
+
+    # --- 4. GRAN TOTAL FINAL ---
+    pdf.ln(10)
+    if pdf.get_y() + 20 > 270: pdf.add_page() # Asegurar que el total no quede cortado
+    pdf.set_fill_color(0, 51, 102)
+    pdf.set_text_color(255, 255, 255)
+    pdf.set_font("Arial", "B", 16)
+    
+    pdf.cell(140, 15, txt=" INVERSIÓN TOTAL PROYECTO (Q)", fill=True)
+    pdf.cell(50, 15, txt=fin['gran_total'] + " ", fill=True, align="R", ln=True)
     
     return pdf.output(dest="S").encode("latin-1")
 
+# --- INICIALIZAR ESTADO ---
+if 'repuestos' not in st.session_state:
+    st.session_state['repuestos'] = []
+if 'mano_obra_lista' not in st.session_state:
+    st.session_state['mano_obra_lista'] = []
+
 # --- INTERFAZ GRÁFICA ---
-st.title("🚗 Importadora - Cotizador Pro")
+st.title("🚗 Importadora - Cotizador V7")
 
 # 1. DATOS DEL CARRO
 st.header("1. Datos del Vehículo")
@@ -336,7 +449,7 @@ with col_car1:
     marca = col_m.text_input("Marca", placeholder="Toyota")
     modelo = col_mod.text_input("Modelo", placeholder="Corolla")
     anio = col_a.text_input("Año", placeholder="2020")
-foto_carro = st.file_uploader("Subir Foto (Opcional)", type=["jpg", "png", "jpeg"])
+foto_carro = st.file_uploader("Subir Foto del Auto", type=["jpg", "png", "jpeg"])
 
 # 2. COMPRA Y SUBASTA
 st.header("2. Detalles de Compra")
@@ -355,16 +468,83 @@ estado_user = st.selectbox("Estado:", sorted(list(GRUAS.keys())))
 patio_user = st.selectbox("Patio/Ciudad:", sorted(list(GRUAS[estado_user].keys())))
 precio_grua = GRUAS[estado_user][patio_user]
 
-# 4. EXTRAS Y REPARACIÓN
-st.header("4. Gastos Adicionales")
-ce1, ce2 = st.columns(2)
-with ce1:
-    usar_flete_gt = st.checkbox(f"Incluir Flete Interno (Puerto -> Capital) (+Q900)")
-with ce2:
-    costo_reparacion_q = st.number_input("Estimado Reparaciones (Q)", min_value=0.0, step=500.0, help="Suma al final.")
+# 4. GESTOR DE REPUESTOS Y MANO DE OBRA (NUEVO)
+st.header("4. Reparaciones y Repuestos")
 
-# BOTÓN
-if st.button("CALCULAR PRESUPUESTO 🚀", use_container_width=True):
+# TABS PARA ORGANIZAR MEJOR
+tab1, tab2 = st.tabs(["🔩 Repuestos", "🛠️ Mano de Obra"])
+
+with tab1:
+    st.write("Agrega aquí los repuestos cotizados:")
+    with st.form("form_repuesto", clear_on_submit=True):
+        c_rep1, c_rep2 = st.columns([2, 1])
+        with c_rep1:
+            nom_rep = st.text_input("Nombre Repuesto", placeholder="Ej. Radiador")
+            link_rep = st.text_input("Link / Tienda", placeholder="Ej. FPK / Moauto")
+        with c_rep2:
+            prec_rep = st.number_input("Precio (Q)", min_value=0.0, step=50.0)
+            foto_rep = st.file_uploader("Foto Miniatura", type=["jpg", "png"])
+        
+        if st.form_submit_button("➕ Agregar Repuesto"):
+            if nom_rep and prec_rep > 0:
+                foto_bytes = foto_rep.getvalue() if foto_rep else None
+                st.session_state['repuestos'].append({
+                    "nombre": nom_rep, "precio": prec_rep, "link": link_rep, "foto_bytes": foto_bytes
+                })
+                st.rerun()
+
+    if st.session_state['repuestos']:
+        st.write("**Listado:**")
+        total_rep = 0
+        for i, r in enumerate(st.session_state['repuestos']):
+            c_lst1, c_lst2, c_lst3 = st.columns([3, 1, 1])
+            icon = "📸" if r['foto_bytes'] else ""
+            c_lst1.text(f"{icon} {r['nombre']} ({r['link']})")
+            c_lst2.text(f"Q{r['precio']:,.2f}")
+            if c_lst3.button("❌", key=f"del_rep_{i}"):
+                st.session_state['repuestos'].pop(i)
+                st.rerun()
+            total_rep += r['precio']
+        st.info(f"Subtotal Repuestos: Q{total_rep:,.2f}")
+
+with tab2:
+    st.write("Agrega servicios de mano de obra:")
+    with st.form("form_mo", clear_on_submit=True):
+        c_mo1, c_mo2 = st.columns([2, 1])
+        with c_mo1:
+            desc_mo = st.text_input("Descripción Servicio", placeholder="Ej. Pintura General")
+        with c_mo2:
+            prec_mo = st.number_input("Costo Estimado (Q)", min_value=0.0, step=100.0)
+        
+        if st.form_submit_button("➕ Agregar Mano de Obra"):
+            if desc_mo and prec_mo > 0:
+                st.session_state['mano_obra_lista'].append({"descripcion": desc_mo, "precio": prec_mo})
+                st.rerun()
+
+    if st.session_state['mano_obra_lista']:
+        st.write("**Listado:**")
+        total_mo = 0
+        for i, m in enumerate(st.session_state['mano_obra_lista']):
+            c_lst1, c_lst2, c_lst3 = st.columns([3, 1, 1])
+            c_lst1.text(m['descripcion'])
+            c_lst2.text(f"Q{m['precio']:,.2f}")
+            if c_lst3.button("❌", key=f"del_mo_{i}"):
+                st.session_state['mano_obra_lista'].pop(i)
+                st.rerun()
+            total_mo += m['precio']
+        st.info(f"Subtotal Mano de Obra: Q{total_mo:,.2f}")
+
+# Calcular totales de reparación
+sum_repuestos = sum(r['precio'] for r in st.session_state['repuestos'])
+sum_mano_obra = sum(m['precio'] for m in st.session_state['mano_obra_lista'])
+total_reparaciones_q = sum_repuestos + sum_mano_obra
+
+# 5. OPCIONES ADICIONALES
+st.write("---")
+usar_flete_gt = st.checkbox("Incluir Flete Interno (Puerto -> Capital) (+Q900)", value=True)
+
+# BOTÓN PRINCIPAL
+if st.button("CALCULAR PRESUPUESTO FINAL 🚀", use_container_width=True):
     st.divider()
     
     # --- CÁLCULOS ---
@@ -396,22 +576,17 @@ if st.button("CALCULAR PRESUPUESTO 🚀", use_container_width=True):
     
     gran_total_usd = base_imponible_usd + impuestos_usd + total_logistica_usd
     total_final_quetzales = (gran_total_usd * TASA_CAMBIO) + gasto_local_total
-    total_con_reparacion = total_final_quetzales + costo_reparacion_q
+    total_con_reparacion = total_final_quetzales + total_reparaciones_q
     
-    # --- VISUALIZACIÓN EN PANTALLA (DETALLADA) ---
+    # --- VISUALIZACIÓN EN PANTALLA ---
     st.subheader("📊 Análisis de Costos")
-    
     col_izq, col_der = st.columns(2)
-    
     with col_izq:
         st.markdown("### 1. Copart (USA)")
         st.write(f"Subasta: ${precio_subasta:,.2f}")
         st.write(f"Buyer Fee: ${buyer:,.2f}")
-        st.write(f"Virtual Bid: ${virtual:,.2f}")
-        st.write(f"Gate/Env/Title: ${gate_env_total:,.2f}")
         st.markdown(f"**Total Copart: ${base_imponible_usd:,.2f}**")
         st.caption("Base para impuestos")
-        
         st.markdown("### 3. Impuestos (SAT)")
         st.metric("Total (32%)", f"Q{impuestos_gtq:,.2f}", f"${impuestos_usd:,.2f}")
 
@@ -419,31 +594,27 @@ if st.button("CALCULAR PRESUPUESTO 🚀", use_container_width=True):
         st.markdown("### 2. Logística")
         st.write(f"🚛 Grúa: ${precio_grua:,.2f}")
         st.write(f"🚢 Barco: ${costo_barco:,.2f}")
-        st.write(f"📄 Docs: ${TOTAL_EXTRAS_USD:,.2f}")
+        st.write(f"📄 Docs+Wire: ${TOTAL_EXTRAS_USD:,.2f}")
         st.markdown(f"**Total Logística: ${total_logistica_usd:,.2f}**")
-        
         st.markdown("### 4. Locales (GT)")
-        st.write(f"Trámites/Placas: Q{gasto_local_base:,.2f}")
-        st.write(f"Aduanal: Q{EXTRA_GTQ_TRAMITE_ADUANAL:,.2f}")
-        st.write(f"Flete Interno: {'Q900.00' if usar_flete_gt else 'No'}")
-        st.markdown(f"**Total Locales: Q{gasto_local_total:,.2f}**")
+        st.write(f"Trámites/Aduana: Q{gasto_local_total:,.2f}")
 
     st.divider()
-    
-    # TOTAL GIGANTE
     c_tot1, c_tot2 = st.columns([2, 1])
     with c_tot1:
-        st.markdown("### 🏁 COSTO TOTAL (Puesto en Guate)")
-        st.success(f"Q{total_final_quetzales:,.2f}")
-        if costo_reparacion_q > 0:
-            st.caption(f" + Q{costo_reparacion_q:,.2f} de reparaciones = **Q{total_con_reparacion:,.2f}** Total Proyecto")
+        st.markdown("### 🏁 TOTAL PROYECTO")
+        st.success(f"Q{total_final_quetzales:,.2f} (Importación)")
+        if total_reparaciones_q > 0:
+            st.metric("Total con Reparaciones", f"Q{total_con_reparacion:,.2f}", f"+ Q{total_reparaciones_q:,.2f}")
     
-    # --- BOTÓN PDF (Solo aparece después de calcular) ---
+    # --- BOTÓN PDF ---
     with c_tot2:
-        st.write("") # Espacio
         st.write("") 
         
-        # Preparar datos para el PDF
+        # Helper para formato doble moneda
+        def fmt_dual(val_usd):
+            return f"${val_usd:,.2f} (Q{val_usd * TASA_CAMBIO:,.2f})"
+
         datos_pdf_completo = {
             'vehiculo': {
                 'lote': lote if lote else "---",
@@ -452,31 +623,53 @@ if st.button("CALCULAR PRESUPUESTO 🚀", use_container_width=True):
                 'ubicacion': f"{patio_user}, {estado_user}"
             },
             'financiero': {
-                'precio_subasta': f"${precio_subasta:,.2f}",
-                'buyer': f"${buyer:,.2f}",
-                'virtual': f"${virtual:,.2f}",
-                'gate_env': f"${gate_env_total:,.2f}",
-                'total_copart': f"${base_imponible_usd:,.2f}",
-                'grua': f"${precio_grua:,.2f}",
-                'barco': f"${costo_barco:,.2f}",
-                'extras_usa': f"${TOTAL_EXTRAS_USD:,.2f}",
-                'total_logistica': f"${total_logistica_usd:,.2f}",
+                # AHORA CON DOBLE MONEDA EN SECCIONES DE USA
+                'precio_subasta': fmt_dual(precio_subasta),
+                'total_copart': fmt_dual(base_imponible_usd),
+                'total_logistica': fmt_dual(total_logistica_usd),
+                
+                # Lo de GT se queda en Q
                 'impuestos_gtq': f"Q{impuestos_gtq:,.2f} (${impuestos_usd:,.2f})",
-                'gastos_fijos_gt': f"Q{gasto_local_base:,.2f}",
                 'tramite_aduanal': f"Q{EXTRA_GTQ_TRAMITE_ADUANAL:,.2f}",
                 'flete_interno': f"Q900.00" if usar_flete_gt else "No incluido",
                 'total_locales': f"Q{gasto_local_total:,.2f}",
-                'reparaciones': f"Q{costo_reparacion_q:,.2f}",
-                'gran_total': f"Q{total_con_reparacion:,.2f}"
-            }
+                'total_reparaciones': f"Q{total_reparaciones_q:,.2f}",
+                'gran_total': f"Q{total_con_reparacion:,.2f}",
+                
+                # Detalle USA para tabla (Doble moneda)
+                'grua': fmt_dual(precio_grua),
+                'barco': fmt_dual(costo_barco),
+                'extras_usa': fmt_dual(TOTAL_EXTRAS_USD),
+            },
+            # Detalle Atómico para el PDF (Doble moneda)
+            'detalle_copart': {
+                'buyer': fmt_dual(buyer),
+                'virtual': fmt_dual(virtual),
+                'gate': fmt_dual(gate),
+                'env': fmt_dual(env),
+                'title': fmt_dual(title),
+            },
+            'detalle_usa': {
+                'bl': fmt_dual(EXTRA_USD_BL),
+                'papeleria': fmt_dual(EXTRA_USD_PAPELERIA),
+                'wire': fmt_dual(EXTRA_USD_WIRE),
+            },
+            'detalle_gt': {
+                'honorarios': f"Q{EXTRA_GTQ_HONORARIOS:,.2f}",
+                'placas': f"Q{EXTRA_GTQ_PLACAS:,.2f}",
+                'circulacion': f"Q{EXTRA_GTQ_CIRCULACION:,.2f}",
+            },
+            'lista_repuestos': st.session_state['repuestos'],
+            'lista_mano_obra': st.session_state['mano_obra_lista'],
+            'subtotal_repuestos': f"Q{sum_repuestos:,.2f}",
+            'subtotal_mano_obra': f"Q{sum_mano_obra:,.2f}"
         }
         
-        # Generar PDF en memoria
         pdf_bytes = generar_pdf_detallado(datos_pdf_completo, foto_carro)
         
         st.download_button(
             label="📄 Descargar PDF Detallado",
             data=pdf_bytes,
-            file_name=f"Cotizacion_{lote if lote else 'Vehiculo'}.pdf",
+            file_name=f"Cotizacion_{lote if lote else 'V7'}.pdf",
             mime="application/pdf"
         )
